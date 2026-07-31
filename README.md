@@ -17,6 +17,7 @@ On each scheduled run, the plugin:
 - enforces per-run cap (`max_events`)
 - deduplicates events using cached update markers (`skip_unchanged=true`)
 - writes normalized earthquake event rows to the destination measurement (default `earthquakes`)
+- can write directly into an existing canonical `quake` table with its original column names and types (`write_quake_schema=true`)
 
 ## Files
 
@@ -32,6 +33,7 @@ On each scheduled run, the plugin:
 - `source_query`: optional SQL override for table mode
 - `lookback_minutes`: table query lookback window (default `15`)
 - `measurement`: destination measurement (default `earthquakes`)
+- `write_quake_schema`: write only the canonical `quake` columns (`depth`, `depthError`, `dmin`, `gap`, `horizontalError`, `id`, `latitude`, `locationSource`, `longitude`, `mag`, `magError`, `magNst`, `magSource`, `magType`, `net`, `nst`, `place`, `rms`, `status`, `time`, and `type`). Use with `measurement=quake`.
 
 - `min_magnitude`: minimum magnitude filter
 - `max_events`: max events processed per run
@@ -46,7 +48,7 @@ On each scheduled run, the plugin:
 
 - `earthquake_sampler.py`
 
-2) Create a scheduled trigger (example reads from existing `usgs.quake`):
+2) Create a scheduled trigger that fetches the USGS GeoJSON `all_hour` feed and writes it directly to `usgs.quake`:
 
 ```bash
 influxdb3 create trigger \
@@ -54,8 +56,8 @@ influxdb3 create trigger \
   --path ./earthquake_sampler.py \
   --upload \
   --trigger-spec "every:2m" \
-  --trigger-arguments "source_type=influxdb_table,source_table=quake,measurement=earthquakes,lookback_minutes=15,max_events=500,min_magnitude=0.0,skip_unchanged=true" \
-  earthquake_from_table
+  --trigger-arguments "source_type=http,feed=all_hour,measurement=quake,write_quake_schema=true,max_events=500,min_magnitude=0.0,skip_unchanged=true,use_event_timestamp=true" \
+  usgs_to_quake
 ```
 
 ### Option B: Local Kubernetes install (namespace `influxdb3`, processor pod)
@@ -82,8 +84,8 @@ influxdb3 create trigger \
   --path /tmp/earthquake_sampler.py \
   --upload \
   --trigger-spec 'every:2m' \
-  --trigger-arguments 'source_type=influxdb_table,source_table=quake,measurement=earthquakes,lookback_minutes=15,max_events=500,min_magnitude=0.0,skip_unchanged=true' \
-  earthquake_from_table
+  --trigger-arguments 'source_type=http,feed=all_hour,measurement=quake,write_quake_schema=true,max_events=500,min_magnitude=0.0,skip_unchanged=true,use_event_timestamp=true' \
+  usgs_to_quake
 "
 ```
 
@@ -94,14 +96,15 @@ influxdb3 create trigger \
 influxdb3 query --database usgs "SELECT trigger_name, trigger_specification, disabled FROM system.processing_engine_triggers"
 
 # Plugin logs
-influxdb3 query --database usgs "SELECT time, trigger_name, log_level, log_text FROM system.processing_engine_logs WHERE trigger_name='earthquake_from_table' ORDER BY time DESC LIMIT 20"
+influxdb3 query --database usgs "SELECT time, trigger_name, log_level, log_text FROM system.processing_engine_logs WHERE trigger_name='usgs_to_quake' ORDER BY time DESC LIMIT 20"
 
 # Event data
-influxdb3 query --database usgs "SELECT time, event_id, magnitude, place, latitude, longitude, depth_km FROM earthquakes ORDER BY time DESC LIMIT 20"
+influxdb3 query --database usgs "SELECT id, mag, place, latitude, longitude, depth, time FROM quake ORDER BY time DESC LIMIT 20"
 ```
 
 ## Notes
 
 - This repo is intentionally minimal: docs + plugin code.
 - No extra Python dependencies are required in plugin code (stdlib only).
-- The plugin does not create or write an `earthquake_plugin_stats` table. If `usgs.quake` is already your canonical earthquake table, no scheduled copy trigger is needed.
+- The plugin does not create or write an `earthquake_plugin_stats` table.
+- `write_quake_schema=true` is intended for an existing `quake` table with the documented schema; it never writes tags or normalized-only columns such as `event_id` or `magnitude`.

@@ -50,6 +50,12 @@
             "description": "Destination measurement name for earthquake events. Defaults to earthquakes.",
             "required": false
         },
+        {
+            "name": "write_quake_schema",
+            "example": "true",
+            "description": "Write USGS events using the existing quake table's column names and types. Use with measurement=quake; no tags or extra columns are written.",
+            "required": false
+        },
 
         {
             "name": "min_magnitude",
@@ -427,6 +433,69 @@ def _write_event(
     return True
 
 
+QUAKE_FLOAT_COLUMN_MAP = {
+    "depth": "depth_km",
+    "depthError": "depth_error",
+    "dmin": "distance_km",
+    "gap": "gap_degrees",
+    "horizontalError": "horizontal_error",
+    "latitude": "latitude",
+    "longitude": "longitude",
+    "mag": "magnitude",
+    "magError": "mag_error",
+    "magNst": "mag_nst",
+    "nst": "nst",
+    "rms": "rms",
+}
+
+QUAKE_STRING_COLUMN_MAP = {
+    "id": "event_id",
+    "locationSource": "location_source",
+    "magSource": "mag_source",
+    "magType": "mag_type",
+    "net": "net",
+    "place": "place",
+    "status": "status",
+    "type": "event_type",
+}
+
+
+def _write_quake_event(
+    influxdb3_local,
+    measurement: str,
+    event: Dict[str, Any],
+    fallback_ts_ns: int,
+    use_event_timestamp: bool,
+) -> bool:
+    """Write a normalized USGS event to a table using only the canonical quake schema."""
+    timestamp_ns = fallback_ts_ns
+    if use_event_timestamp and event.get("event_time_ns") is not None:
+        try:
+            timestamp_ns = int(event["event_time_ns"])
+        except (TypeError, ValueError):
+            pass
+
+    line = _line_builder(measurement).time_ns(timestamp_ns)
+    for column, event_key in QUAKE_FLOAT_COLUMN_MAP.items():
+        value = event.get(event_key)
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            line.float64_field(column, numeric)
+
+    for column, event_key in QUAKE_STRING_COLUMN_MAP.items():
+        value = event.get(event_key)
+        if value is not None:
+            line.string_field(column, _safe_string(value))
+
+    influxdb3_local.write(line)
+    return True
+
+
 
 def process_scheduled_call(
     influxdb3_local,
@@ -461,7 +530,7 @@ def process_scheduled_call(
         source = source_query if source_query else source_table
 
     measurement = _safe_string(args.get("measurement", "earthquakes")) or "earthquakes"
-
+    write_quake_schema = _parse_bool(args.get("write_quake_schema"), False)
     min_magnitude = _parse_float(args.get("min_magnitude"), 0.0)
     max_events = max(1, _parse_int(args.get("max_events"), 250))
     use_event_timestamp = _parse_bool(args.get("use_event_timestamp"), True)
@@ -544,13 +613,23 @@ def process_scheduled_call(
             continue
 
         try:
-            if _write_event(
-                influxdb3_local=influxdb3_local,
-                measurement=measurement,
-                event=event,
-                fallback_ts_ns=now_ns,
-                use_event_timestamp=use_event_timestamp,
-            ):
+            if write_quake_schema:
+                did_write = _write_quake_event(
+                    influxdb3_local=influxdb3_local,
+                    measurement=measurement,
+                    event=event,
+                    fallback_ts_ns=now_ns,
+                    use_event_timestamp=use_event_timestamp,
+                )
+            else:
+                did_write = _write_event(
+                    influxdb3_local=influxdb3_local,
+                    measurement=measurement,
+                    event=event,
+                    fallback_ts_ns=now_ns,
+                    use_event_timestamp=use_event_timestamp,
+                )
+            if did_write:
                 written += 1
                 if max_marker_this_run is None or marker > max_marker_this_run:
                     max_marker_this_run = marker
