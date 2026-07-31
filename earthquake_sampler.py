@@ -425,30 +425,6 @@ def _write_event(
     return True
 
 
-def _write_stats(
-    influxdb3_local,
-    source: str,
-    source_format: str,
-    fetched_events: int,
-    written_events: int,
-    skipped_events: int,
-    min_magnitude: float,
-    measurement: str,
-    task_id: str,
-) -> None:
-    line = _line_builder("earthquake_plugin_stats")
-    line.tag("plugin", "earthquake_sampler")
-    line.tag("source", source)
-    line.tag("source_format", source_format)
-    line.tag("measurement", measurement)
-    line.int64_field("fetched_events", fetched_events)
-    line.int64_field("written_events", written_events)
-    line.int64_field("skipped_events", skipped_events)
-    line.float64_field("min_magnitude", min_magnitude)
-    line.string_field("task_id", task_id)
-    influxdb3_local.write(line)
-
-
 def process_scheduled_call(
     influxdb3_local,
     call_time: datetime,
@@ -580,21 +556,6 @@ def process_scheduled_call(
 
     if max_marker_this_run is not None:
         influxdb3_local.cache.put(cache_key, max_marker_this_run, ttl=None)
-
-    try:
-        _write_stats(
-            influxdb3_local=influxdb3_local,
-            source=source,
-            source_format=source_format,
-            fetched_events=fetched,
-            written_events=written,
-            skipped_events=skipped,
-            min_magnitude=min_magnitude,
-            measurement=measurement,
-            task_id=task_id,
-        )
-    except Exception as e:
-        influxdb3_local.warn(f"[{task_id}] Failed to write plugin stats: {_exc(e)}")
 
     influxdb3_local.info(
         f"[{task_id}] Earthquake sampler complete: "

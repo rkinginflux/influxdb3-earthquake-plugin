@@ -16,8 +16,7 @@ On each scheduled run, the plugin:
 - filters by minimum magnitude (`min_magnitude`)
 - enforces per-run cap (`max_events`)
 - deduplicates events using cached update markers (`skip_unchanged=true`)
-- writes event rows to the destination measurement (default `earthquakes`)
-- writes run stats to `earthquake_plugin_stats`
+- writes only normalized event rows to the destination measurement (default `earthquakes`)
 
 ## Files
 
@@ -95,9 +94,6 @@ influxdb3 query --database usgs "SELECT trigger_name, trigger_specification, dis
 
 # Plugin logs
 influxdb3 query --database usgs "SELECT time, trigger_name, log_level, log_text FROM system.processing_engine_logs WHERE trigger_name='earthquake_from_table' ORDER BY time DESC LIMIT 20"
-
-# Run stats
-influxdb3 query --database usgs "SELECT time, source, source_format, fetched_events, written_events, skipped_events FROM earthquake_plugin_stats ORDER BY time DESC LIMIT 20"
 
 # Event data
 influxdb3 query --database usgs "SELECT time, event_id, magnitude, place, latitude, longitude, depth_km FROM earthquakes ORDER BY time DESC LIMIT 20"
