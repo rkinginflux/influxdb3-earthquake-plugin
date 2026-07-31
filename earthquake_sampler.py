@@ -51,6 +51,12 @@
             "required": false
         },
         {
+            "name": "preserve_source_schema",
+            "example": "true",
+            "description": "When true with source_type=influxdb_table, copy source rows using the quake column names and types rather than the normalized event schema.",
+            "required": false
+        },
+        {
             "name": "min_magnitude",
             "example": "2.5",
             "description": "Minimum earthquake magnitude to ingest from the selected feed. Defaults to 0.",
@@ -204,6 +210,43 @@ def _to_ns_from_iso(ts: Any) -> Optional[int]:
         return int(dt.timestamp() * 1_000_000_000)
     except Exception:
         return None
+
+
+def _to_ns_from_timestamp(value: Any) -> Optional[int]:
+    """Convert common query-runtime timestamp values to nanoseconds."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return int(dt.astimezone(timezone.utc).timestamp() * 1_000_000_000)
+    if hasattr(value, "as_py"):
+        try:
+            return _to_ns_from_timestamp(value.as_py())
+        except Exception:
+            pass
+    if isinstance(value, int):
+        magnitude = abs(value)
+        if magnitude >= 100_000_000_000_000_000:
+            return value  # nanoseconds
+        if magnitude >= 100_000_000_000_000:
+            return value * 1_000  # microseconds
+        if magnitude >= 100_000_000_000:
+            return value * 1_000_000  # milliseconds
+        return value * 1_000_000_000  # seconds
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = None
+    if numeric is not None and math.isfinite(numeric):
+        magnitude = abs(numeric)
+        if magnitude >= 100_000_000_000_000_000:
+            return int(numeric)  # nanoseconds
+        if magnitude >= 100_000_000_000_000:
+            return int(numeric * 1_000)  # microseconds
+        if magnitude >= 100_000_000_000:
+            return int(numeric * 1_000_000)  # milliseconds
+        return int(numeric * 1_000_000_000)  # seconds
+    return _to_ns_from_iso(value)
 
 
 def _to_update_marker_ms(event: Dict[str, Any]) -> int:
@@ -425,6 +468,64 @@ def _write_event(
     return True
 
 
+QUAKE_FLOAT_COLUMNS = (
+    "depth",
+    "depthError",
+    "dmin",
+    "gap",
+    "horizontalError",
+    "latitude",
+    "longitude",
+    "mag",
+    "magError",
+    "magNst",
+    "nst",
+    "rms",
+)
+
+QUAKE_STRING_COLUMNS = (
+    "id",
+    "locationSource",
+    "magSource",
+    "magType",
+    "net",
+    "place",
+    "status",
+    "type",
+)
+
+
+def _write_quake_schema_row(
+    influxdb3_local,
+    measurement: str,
+    row: Dict[str, Any],
+    fallback_ts_ns: int,
+) -> bool:
+    """Write a source `quake` row without renaming columns or creating tags."""
+    source_time = row.get("time")
+    timestamp_ns = _to_ns_from_timestamp(source_time) or fallback_ts_ns
+    line = _line_builder(measurement).time_ns(timestamp_ns)
+
+    for column in QUAKE_FLOAT_COLUMNS:
+        value = row.get(column)
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            line.float64_field(column, numeric)
+
+    for column in QUAKE_STRING_COLUMNS:
+        value = row.get(column)
+        if value is not None:
+            line.string_field(column, _safe_string(value))
+
+    influxdb3_local.write(line)
+    return True
+
+
 def process_scheduled_call(
     influxdb3_local,
     call_time: datetime,
@@ -458,6 +559,7 @@ def process_scheduled_call(
         source = source_query if source_query else source_table
 
     measurement = _safe_string(args.get("measurement", "earthquakes")) or "earthquakes"
+    preserve_source_schema = _parse_bool(args.get("preserve_source_schema"), False)
     min_magnitude = _parse_float(args.get("min_magnitude"), 0.0)
     max_events = max(1, _parse_int(args.get("max_events"), 250))
     use_event_timestamp = _parse_bool(args.get("use_event_timestamp"), True)
@@ -504,7 +606,7 @@ def process_scheduled_call(
         influxdb3_local.warn(f"[{task_id}] No events found for source_type={source_type} source_format={source_format}")
         return
 
-    normalized = [_normalize_event(i, source_format) for i in items]
+    normalized = [(item, _normalize_event(item, source_format)) for item in items]
 
     last_seen_marker = influxdb3_local.cache.get(cache_key)
     try:
@@ -517,9 +619,9 @@ def process_scheduled_call(
     skipped = 0
     max_marker_this_run: Optional[int] = last_seen_marker
 
-    normalized.sort(key=_to_update_marker_ms, reverse=True)
+    normalized.sort(key=lambda item: _to_update_marker_ms(item[1]), reverse=True)
 
-    for event in normalized:
+    for source_row, event in normalized:
         if fetched >= max_events:
             break
         fetched += 1
@@ -540,13 +642,22 @@ def process_scheduled_call(
             continue
 
         try:
-            if _write_event(
-                influxdb3_local=influxdb3_local,
-                measurement=measurement,
-                event=event,
-                fallback_ts_ns=now_ns,
-                use_event_timestamp=use_event_timestamp,
-            ):
+            if preserve_source_schema and source_type == "influxdb_table":
+                did_write = _write_quake_schema_row(
+                    influxdb3_local=influxdb3_local,
+                    measurement=measurement,
+                    row=source_row,
+                    fallback_ts_ns=now_ns,
+                )
+            else:
+                did_write = _write_event(
+                    influxdb3_local=influxdb3_local,
+                    measurement=measurement,
+                    event=event,
+                    fallback_ts_ns=now_ns,
+                    use_event_timestamp=use_event_timestamp,
+                )
+            if did_write:
                 written += 1
                 if max_marker_this_run is None or marker > max_marker_this_run:
                     max_marker_this_run = marker
